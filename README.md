@@ -1,5 +1,7 @@
 # R1D1
 
+A Meta AI Developer Hackathon project.
+
 A supervised iRobot Create + Raspberry Pi robot that finds a visual target,
 approaches it, and reports to its owner through Muse. The working demo finds
 a doll wearing an **I ♥ AI** shirt, or chains a **black Roomba → doll** mission.
