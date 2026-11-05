@@ -1,2 +1,0 @@
--r requirements.txt
-meta-sam-parser==0.1.0

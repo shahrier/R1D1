@@ -68,15 +68,14 @@ def capture(store, fake=False, source=None):
     elif source:
         prepare_image(source, path)
     else:
-        subprocess.run([str(Path.home() / "scout-snap"), str(path)], check=True,
-                       capture_output=True, timeout=15)
+        from camera import capture_photo
+        capture_photo(path)
         prepare_image(path, path)
     return str(path), image_info(path)
 
 
 def validate_observation(value):
-    expected = {"target_present", "description", "lighting", "baseline_comparison",
-                "acknowledged_comparison"}
+    expected = {"target_present", "description", "lighting", "baseline_comparison", "acknowledged_comparison"}
     if set(value) != expected:
         raise ValueError("Observation fields do not match the expected schema")
     if value["target_present"] is not None and type(value["target_present"]) is not bool:
@@ -116,16 +115,14 @@ def inspect(store, scope="bedroom-demo", target="suitcase", send=False,
         if ack and (ack["target"] != target or time.time() >= ack["expires_at"]):
             ack = None
         current, info = capture(store, fake=fake, source=source)
-        references = []
-        images = [current]
+        references, images = [], [current]
         if memory.get("baseline"):
             references.append("baseline")
             images.append(memory["baseline"]["photo"])
         if ack:
             references.append("acknowledged")
             images.append(ack["photo"])
-        supplied = {"target": target, "scope": scope, "image_info": info,
-                    "reference_order": references}
+        supplied = {"target": target, "scope": scope, "image_info": info, "reference_order": references}
         if fake:
             observation = {"target_present": True, "description": "Simulated suitcase in view.",
                            "lighting": "good", "baseline_comparison": "unavailable",
@@ -138,11 +135,9 @@ def inspect(store, scope="bedroom-demo", target="suitcase", send=False,
                 store.log({"kind": "inspection_error", "photo": current,
                            "error": type(exc).__name__, "model": brain.last})
                 raise
-        # Never accept fabricated comparisons to references we did not supply.
-        if "baseline" not in references:
-            observation["baseline_comparison"] = "unavailable"
-        if "acknowledged" not in references:
-            observation["acknowledged_comparison"] = "unavailable"
+        for ref, field in (("baseline", "baseline_comparison"), ("acknowledged", "acknowledged_comparison")):
+            if ref not in references:
+                observation[field] = "unavailable"
         suppressed = should_suppress(observation, ack, target, scope, info["brightness"])
         event_id = uuid.uuid4().hex[:12]
         event = {"id": event_id, "kind": "inspection", "timestamp": now(),
@@ -179,9 +174,10 @@ def acknowledge(store, event_id, note, hours=1):
         memory = state["scopes"][event["scope"]]
         if memory["latest_event"] != event_id:
             raise ValueError("Observation is stale; acknowledge the latest inspection")
-        memory["acknowledgement"] = {"event_id": event_id, "photo": event["photo"],
-             "scope": event["scope"], "target": event["target"], "owner_note": note,
-             "acknowledged_at": now(), "expires_at": time.time() + hours * 3600}
+        memory["acknowledgement"] = {
+            "event_id": event_id, "photo": event["photo"], "scope": event["scope"],
+            "target": event["target"], "owner_note": note,
+            "acknowledged_at": now(), "expires_at": time.time() + hours * 3600}
         store.log({"kind": "owner_acknowledgement", **memory["acknowledgement"]})
         return {"acknowledged": event_id, "expires_in_hours": hours}
 
@@ -203,8 +199,7 @@ def main():
     p.add_argument("--hours", type=float, default=1)
     sub.add_parser("status")
     sub.add_parser("reset")
-    p = sub.add_parser("baseline")
-    p.add_argument("--dry-run", action="store_true")
+    sub.add_parser("baseline").add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if getattr(args, "dry_run", False):
         args.root = str(Path(args.root) / "simulation")

@@ -1,0 +1,12 @@
+[Unit]
+Description=R1D1 read-only visual memory dashboard
+After=network.target
+[Service]
+Type=simple
+User=emon
+WorkingDirectory=/home/emon/r1d1
+ExecStart=/home/emon/r1d1/.venv/bin/python /home/emon/r1d1/map_viewer.py
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

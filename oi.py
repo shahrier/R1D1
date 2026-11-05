@@ -1,9 +1,6 @@
-"""Original Create OI: one serial owner, bounded motion, independent worker stop.
-
-Serial setup/send/drive/stop helpers are copied from the owner's scout-mission.
-The new sensor/controller code fails closed on missing packets or any hazard.
-"""
+"""Original Create OI: one serial owner, bounded motion, independent worker stop."""
 import fcntl
+import json
 import math
 import multiprocessing as mp
 import os
@@ -21,26 +18,27 @@ def open_port():
     fd = os.open(PORT, os.O_RDWR | os.O_NOCTTY)
     a = termios.tcgetattr(fd)
     a[4] = a[5] = termios.B57600
-    a[2] &= ~termios.CSIZE; a[2] |= termios.CS8
-    a[2] &= ~(termios.PARENB | termios.CSTOPB)
-    if hasattr(termios, "CRTSCTS"): a[2] &= ~termios.CRTSCTS
-    a[2] |= (termios.CREAD | termios.CLOCAL)
+    a[2] = (a[2] & ~(termios.CSIZE | termios.PARENB | termios.CSTOPB)) | termios.CS8 | termios.CREAD | termios.CLOCAL
+    if hasattr(termios, "CRTSCTS"):
+        a[2] &= ~termios.CRTSCTS
     a[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.ISTRIP | termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON | termios.PARMRK)
     a[1] &= ~termios.OPOST
     a[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
-    a[6][termios.VMIN] = 0; a[6][termios.VTIME] = 0
+    a[6][termios.VMIN] = a[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, a)
     return fd
 
 
-def send(fd, data): os.write(fd, bytes(data))
+def send(fd, data):
+    os.write(fd, bytes(data))
 
 
 def drive(fd, vel):
     send(fd, [137] + list(struct.pack(">h", vel)) + [0x80, 0x00])
 
 
-def stop(fd): drive(fd, 0)
+def stop(fd):
+    drive(fd, 0)
 
 
 def read_exact(fd, n, timeout=0.20):
@@ -79,6 +77,9 @@ def validate_motion(action):
         amount = action.get("distance_mm")
         if type(amount) is not int or not 1 <= amount <= 500:
             raise ValueError("Drive must be 1..500 mm forward; reverse is disabled")
+        speed = action.get('speed_mm_s', 80)
+        if type(speed) is not int or not 40 <= speed <= 120:
+            raise ValueError('Drive speed must be 40..120 mm/s')
     elif action.get("action") == "turn":
         amount = action.get("degrees")
         if type(amount) is not int or not 1 <= abs(amount) <= 180:
@@ -97,29 +98,38 @@ def update_pose(pose, sensors):
 
 
 def _worker(connection, root):
-    # Spawned, not forked: parent death closes its pipe endpoint even during motion.
-    fd = None
-    lock = None
+    fd = lock = None
+    root = Path(root)
     def interrupted(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        lock = (Path(root) / "robot.lock").open("a")
+        lock = (root / "robot.lock").open("a")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fd = open_port()
         send(fd, [128]); time.sleep(.2)
         send(fd, [131]); time.sleep(.2)
         stop(fd)
         termios.tcflush(fd, termios.TCIFLUSH)
-        def poll():
-            send(fd, [142, 0])
-            result = decode_sensors(read_exact(fd, 26))
-            # Keep all hardware samples, including the one that causes an abort.
-            import json
-            with (Path(root) / "sensors.jsonl").open("a") as stream:
+        battery_cache = [0]
+
+        def poll(odometry=True):
+            send(fd, [142, 0 if odometry else 1])
+            if odometry:
+                result = decode_sensors(read_exact(fd, 26))
+                battery_cache[0] = result['battery_mv']
+            else:
+                packet = bytearray(26)
+                packet[:10] = read_exact(fd, 10)
+                packet[17:19] = struct.pack('>H', battery_cache[0])
+                result = decode_sensors(packet)
+            result['odometry_sample'] = odometry
+            result['captured_monotonic'] = time.monotonic()
+            with (root / "sensors.jsonl").open("a") as stream:
                 stream.write(json.dumps({"time": time.time(), **result}) + "\n")
             return result
+
         first = poll()
         if hazard(first):
             raise RuntimeError("Initial sensor hazard; human intervention required")
@@ -127,20 +137,28 @@ def _worker(connection, root):
                 "drift_warning": "Relative wheel odometry only; slip and drift accumulate. Not a map."}
         travelled = 0
         connection.send({"ready": True, "pose": pose, "sensors": first})
-        while True:
-            if (Path(root) / "STOP").exists():
-                break
+        while not (root / "STOP").exists():
             if not connection.poll(.1):
                 stop(fd)
                 continue
             action = connection.recv()
-            if action["action"] == "close":
+            kind = action["action"]
+            if kind == "close":
                 break
-            if action["action"] in {"stop", "status"}:
+            if kind == 'sound':
+                from sound_effects import play_on_fd
+                stop(fd)
+                if hazard(poll()):
+                    raise RuntimeError('Sensor hazard before sound')
+                connection.send(play_on_fd(fd, action['effect']))
+                continue
+            if kind in {"stop", "status"}:
                 stop(fd)
                 sensors = poll()
                 update_pose(pose, sensors)
                 travelled += abs(sensors["distance_mm"])
+                if hazard(sensors):
+                    raise RuntimeError("Stationary sensor hazard; human intervention required")
                 send(fd, [142, 39])
                 velocity = struct.unpack(">h", read_exact(fd, 2))[0]
                 connection.send({"pose": dict(pose), "travelled_mm": travelled,
@@ -154,33 +172,46 @@ def _worker(connection, root):
             send(fd, [142, 35])
             if read_exact(fd, 1) != b"\x02":
                 raise RuntimeError("Create is not in SAFE mode; refusing motion")
-            if action["action"] == "drive":
-                drive(fd, 80)
-                duration = amount / 80 + 1.5
+            if kind == "drive":
+                speed = action.get('speed_mm_s', 80)
+                drive(fd, speed)
+                duration = amount / speed + 2
             else:
                 radius = 1 if amount > 0 else -1
-                send(fd, [137] + list(struct.pack(">hh", 60, radius)))
-                duration = abs(amount) / 20 + 2
+                send(fd, [137] + list(struct.pack(">hh", 30 if abs(amount) <= 30 else 60, radius)))
+                duration = abs(amount) / 12 + 2
             deadline = time.monotonic() + min(duration, 12)
             progress = 0
             readings = []
+            next_odometry = time.monotonic()
+            slowed = False
             while True:
-                if (Path(root) / "STOP").exists() or connection.poll():
+                if (root / "STOP").exists() or connection.poll():
                     raise RuntimeError("Emergency stop or interrupted command")
                 if time.monotonic() > deadline:
                     raise RuntimeError("Motion deadline exceeded; stopped")
-                sensors = poll()
+                sample_odometry = time.monotonic() >= next_odometry
+                sensors = poll(sample_odometry)
+                if sample_odometry:
+                    next_odometry = time.monotonic() + .30
                 readings.append(sensors)
                 update_pose(pose, sensors)
                 travelled += abs(sensors["distance_mm"])
                 if hazard(sensors):
                     raise RuntimeError("Motion hazard; stopped without reversing")
-                progress += sensors["distance_mm"] if action["action"] == "drive" else sensors["angle_degrees"]
+                progress += sensors["distance_mm"] if kind == "drive" else sensors["angle_degrees"]
                 signed_progress = progress if amount > 0 else -progress
                 if signed_progress >= abs(amount):
                     break
+                if kind == 'drive' and amount - progress <= 35 and not slowed:
+                    drive(fd, 40)
+                    slowed = True
+                elif kind == 'turn' and abs(amount) - signed_progress <= 20 and not slowed:
+                    send(fd, [137] + list(struct.pack('>hh', 20, radius)))
+                    slowed = True
                 time.sleep(.03)
             stop(fd)
+            time.sleep(.12)
             after = poll()
             update_pose(pose, after)
             travelled += abs(after["distance_mm"])
@@ -226,7 +257,10 @@ class Robot:
         return result
 
     def execute(self, action):
-        if action["action"] not in {"stop", "status"}:
+        if action['action'] == 'sound':
+            from sound_effects import song_bytes
+            song_bytes(action.get('effect'))
+        elif action["action"] not in {"stop", "status"}:
             validate_motion(action)
         self.connection.send(action)
         self.state = self.receive()
@@ -238,14 +272,15 @@ class Robot:
         if getattr(self, "process", None):
             self.process.join(1)
             if self.process.is_alive():
-                self.process.terminate()  # worker catches SIGTERM and sends STOP
+                self.process.terminate()
                 self.process.join(1)
 
 
 class FakeRobot:
     def __init__(self):
         self.state = {"pose": {"x_mm": 0.0, "y_mm": 0.0, "heading_degrees": 0.0,
-                              "drift_warning": "SIMULATION; relative pose only"}, "travelled_mm": 0}
+                               "drift_warning": "SIMULATION; relative pose only"}, "travelled_mm": 0}
+
     def execute(self, action):
         if action["action"] not in {"stop", "status"}:
             amount = validate_motion(action)
@@ -254,10 +289,10 @@ class FakeRobot:
             if action["action"] == "drive":
                 self.state["travelled_mm"] += amount
         return json_copy(self.state)
+
     def close(self):
         pass
 
 
 def json_copy(value):
-    import json
     return json.loads(json.dumps(value))

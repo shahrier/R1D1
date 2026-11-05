@@ -1,0 +1,15 @@
+[Unit]
+Description=R1D1 webcam with fresh snapshots
+After=network.target
+
+[Service]
+Type=simple
+User=emon
+WorkingDirectory=/home/emon/r1d1
+ExecStart=/usr/bin/python3 /home/emon/r1d1/webcam_stream.py
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

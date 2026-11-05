@@ -1,4 +1,29 @@
 .venv/
+.venv-*/
 __pycache__/
 runtime/
 *.pyc
+
+# Private run evidence, local snapshots, and device state
+review/
+backups/
+*.bak
+*.bak[0-9]*
+*.lock
+*.jsonl
+.DS_Store
+.sf/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+meta_api_key
+
+# Test / build output
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/

@@ -23,14 +23,12 @@ def main():
             raise RuntimeError("STOP latch is set; inspect before clearing")
         try:
             robot = Robot(root)
-            initial = json.loads(json.dumps(robot.state))
-            result = {"test": args.test, "timestamp": now(), "initial": initial}
+            result = {"test": args.test, "timestamp": now(), "initial": json.loads(json.dumps(robot.state))}
             if args.test == "drive":
                 result["motion"] = robot.execute({"action": "drive", "distance_mm": 100})
             elif args.test == "turn":
                 result["motion"] = robot.execute({"action": "turn", "degrees": 15})
             elif args.test == "stop":
-                # Exercise the exact Gadget stop adapter while robot is stationary.
                 started = time.monotonic()
                 subprocess.run(["/usr/bin/python3", str(root.parent / "gadget_command.py"), "stop"],
                                input="{}", text=True, check=True, capture_output=True, timeout=5)
