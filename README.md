@@ -251,3 +251,9 @@ There is no calibrated depth sensor, occupancy map, or reliable whole-house
 navigation. Scan headings and travel distances use drifting wheel odometry.
 Monocular distance estimates can be wrong. The front-entry navigation attempts
 did not reach their destination. This is a supervised research prototype.
+
+## License
+
+Copyright 2026 Emon ([shahrier](https://github.com/shahrier)).
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
